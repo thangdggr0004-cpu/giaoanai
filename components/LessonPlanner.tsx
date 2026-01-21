@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback } from 'react';
 import { EDUCATION_LEVELS, EDUCATION_DATA, BOOK_SERIES, DISPATCHES } from '../constants/educationData';
 import { Lesson, EducationLevel, GenerationStatus } from '../types';
@@ -214,12 +213,96 @@ const LessonPlanner: React.FC = () => {
         return;
     }
 
+    // helper: robustly extract text from different shapes of AI response
+    const extractTextFromPlan = (raw: any): string => {
+      if (raw == null) return '';
+      // if it's already string -> try parse as JSON first (some services return JSON-string)
+      if (typeof raw === 'string') {
+        const trimmed = raw.trim();
+        // try if it's JSON
+        if ((trimmed.startsWith('{') || trimmed.startsWith('[')) ) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            return extractTextFromPlan(parsed);
+          } catch (e) {
+            // not JSON, return the raw string
+            return raw;
+          }
+        }
+        return raw;
+      }
+
+      // If it's an array of text fragments
+      if (Array.isArray(raw)) {
+        return raw.map(r => extractTextFromPlan(r)).join('\n');
+      }
+
+      // If the response has "candidates" (Gemini style)
+      if (raw.candidates && Array.isArray(raw.candidates) && raw.candidates.length > 0) {
+        // pick first candidate, or join all
+        const texts = raw.candidates.map((c: any) => {
+          if (c.content) return extractTextFromPlan(c.content);
+          return extractTextFromPlan(c);
+        }).filter(Boolean);
+        return texts.join('\n\n');
+      }
+
+      // If the response has "content" or "output_text" or "text"
+      if (raw.content) {
+        // content may have parts or text
+        if (typeof raw.content === 'string') return raw.content;
+        if (raw.content.parts && Array.isArray(raw.content.parts)) {
+          return raw.content.parts.map((p: any) => (typeof p === 'string' ? p : (p.text || p))).join('');
+        }
+        if (raw.content.text) return raw.content.text;
+      }
+
+      if (raw.output_text && typeof raw.output_text === 'string') return raw.output_text;
+      if (raw.text && typeof raw.text === 'string') return raw.text;
+      if (raw.output && Array.isArray(raw.output)) {
+        return raw.output.map((o: any) => extractTextFromPlan(o)).join('\n');
+      }
+      if (raw.response && raw.response.output_text) return raw.response.output_text;
+      if (raw.generated_text) return raw.generated_text;
+      if (raw.result && typeof raw.result === 'string') return raw.result;
+
+      // fallback: try to stringify some common nested parts
+      try {
+        // try to find nested "parts"
+        const findParts = (obj: any): string | null => {
+          if (!obj || typeof obj !== 'object') return null;
+          if (Array.isArray(obj.parts)) {
+            return obj.parts.map((p: any) => (p && (p.text || p))).filter(Boolean).join('');
+          }
+          for (const k of Object.keys(obj)) {
+            if (typeof obj[k] === 'object') {
+              const v = findParts(obj[k]);
+              if (v) return v;
+            }
+            if (k === 'text' && typeof obj[k] === 'string') return obj[k];
+          }
+          return null;
+        };
+        const partsVal = findParts(raw);
+        if (partsVal) return partsVal;
+      } catch (e) {
+        // ignore
+      }
+
+      // ultimate fallback: JSON stringify a short version
+      try {
+        return JSON.stringify(raw, null, 2);
+      } catch (e) {
+        return String(raw);
+      }
+    };
+
     let fullContent = '';
     for(let i=0; i<lessonsToGenerate.length; i++) {
         const lesson = lessonsToGenerate[i];
         setGenerationProgress(`Đang soạn bài ${i+1}/${lessonsToGenerate.length}: ${lesson.title}`);
         try {
-            const plan = await generateLessonPlan(
+            const rawPlan: any = await generateLessonPlan(
                 lesson.title, 
                 '', 
                 basePrompt, 
@@ -227,14 +310,31 @@ const LessonPlanner: React.FC = () => {
                 selectedSubject, 
                 selectedGrade
             );
+
+            // Normalize into a string that we can display
+            let planText = extractTextFromPlan(rawPlan);
+            // If the extract is empty, include the raw object for debugging (short)
+            if (!planText || planText.trim() === '') {
+              // try to pretty print a small portion
+              try {
+                planText = '<<Không có nội dung văn bản rõ ràng từ AI. Raw response:>>\n' + JSON.stringify(rawPlan, Object.keys(rawPlan || {}).slice(0, 20), 2);
+              } catch (e) {
+                planText = '<<Không có nội dung văn bản rõ ràng từ AI. Raw response not serializable>>';
+              }
+            }
+
             fullContent += `\n\n===================================\n`;
             fullContent += `GIÁO ÁN BÀI: ${lesson.title.toUpperCase()}\n`;
             fullContent += `BỘ SÁCH: ${selectedBookSeries}\n`;
             fullContent += `===================================\n\n`;
-            fullContent += plan;
+            fullContent += planText;
+            // update partial content so user sees progress text by text
             setGeneratedContent(fullContent);
         } catch (error) {
-            fullContent += `\n\n Lỗi khi tạo giáo án cho bài: ${lesson.title}`;
+            console.error("Error generating plan for", lesson.title, error);
+            fullContent += `\n\n Lỗi khi tạo giáo án cho bài: ${lesson.title}\n`;
+            // append error message for debugging
+            fullContent += `\n[ERROR MESSAGE]: ${error instanceof Error ? error.message : String(error)}\n`;
             setGeneratedContent(fullContent);
         }
     }
