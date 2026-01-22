@@ -1,65 +1,99 @@
-// worker/index.js
-
-const corsHeaders = {
+/* ================== CORS ================== */
+const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
 };
 
+/* ================== MODELS ================== */
+const MODELS = [
+  "gemini-3-flash-preview",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+];
+
+/* ================== ENTRY ================== */
 export default {
-  async fetch(request, env) {
-    // 1. Handle CORS preflight
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: corsHeaders,
-      });
+  async fetch(req, env) {
+    if (req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
 
-    try {
-      const url = new URL(request.url);
-
-      const target =
-        "https://generativelanguage.googleapis.com" +
-        url.pathname +
-        url.search;
-
-      const headers = new Headers();
-      headers.set("x-goog-api-key", env.GENAI_API_KEY);
-      headers.set("content-type", "application/json");
-
-      const body =
-        request.method === "GET" || request.method === "HEAD"
-          ? null
-          : request.body;
-
-      const resp = await fetch(target, {
-        method: request.method,
-        headers,
-        body,
-      });
-
-      // 2. Clone response headers + inject CORS
-      const responseHeaders = new Headers(resp.headers);
-      Object.entries(corsHeaders).forEach(([k, v]) =>
-        responseHeaders.set(k, v)
-      );
-
-      return new Response(resp.body, {
-        status: resp.status,
-        headers: responseHeaders,
-      });
-    } catch (err) {
-      return new Response(
-        JSON.stringify({ error: err.message }),
-        {
-          status: 500,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-        }
-      );
+    const url = new URL(req.url);
+    if (url.pathname !== "/generate" || req.method !== "POST") {
+      return json({ error: "Not found" }, 404);
     }
+
+    return handleGenerate(req, env);
   },
 };
+
+/* ================== HANDLER ================== */
+async function handleGenerate(req, env) {
+  let rawBody;
+
+  try {
+    rawBody = await req.json();
+  } catch {
+    return json({ error: "Invalid JSON body" }, 400);
+  }
+
+  console.log("PATH:", req.url);
+  console.log("RAW BODY:", JSON.stringify(rawBody));
+
+  // 🔥 SDK → REST mapping
+  const { contents } = rawBody;
+
+  if (!contents) {
+    return json({ error: "Missing contents" }, 400);
+  }
+
+  const restPayload = { contents };
+
+  for (const model of MODELS) {
+    try {
+      console.log("TRY MODEL:", model);
+
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": env.GENAI_API_KEY,
+          },
+          body: JSON.stringify(restPayload),
+        }
+      );
+
+      const text = await res.text();
+      console.log(`${model} STATUS:`, res.status);
+      console.log(`${model} RESPONSE:`, text);
+
+      if (res.ok) {
+        return new Response(text, {
+          status: 200,
+          headers: {
+            ...CORS_HEADERS,
+            "Content-Type": "application/json",
+          },
+        });
+      }
+    } catch (err) {
+      console.error(`MODEL ${model} ERROR:`, err);
+    }
+  }
+
+  return json({ error: "All models failed" }, 500);
+}
+
+/* ================== UTIL ================== */
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      ...CORS_HEADERS,
+      "Content-Type": "application/json",
+    },
+  });
+}
