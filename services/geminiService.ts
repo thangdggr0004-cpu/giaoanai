@@ -2,7 +2,7 @@
 // FRONTEND SAFE VERSION
 // ❌ Không dùng @google/genai
 // ❌ Không chứa API KEY
-// ✅ Gọi Cloudflare Worker proxy
+// ✅ Gọi Cloudflare Worker proxy (/generate)
 
 /* ================= TYPES ================= */
 
@@ -26,8 +26,6 @@ interface GeminiResponse {
 
 /* ================= CORE CALL ================= */
 
-const MODEL = 'gemini-3-flash-preview';
-
 async function callGemini(
   payload: any,
   responseAsJson = false
@@ -40,17 +38,14 @@ async function callGemini(
     );
   }
 
-  const res = await fetch(
-    `${baseUrl}/v1beta2/models/${MODEL}:generateContent`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    }
-  );
+  const res = await fetch(`${baseUrl}/generate`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
 
   if (!res.ok) {
     const err = await res.text();
@@ -73,11 +68,6 @@ async function callGemini(
     .join('\n')
     .trim();
 
-  if (!text) {
-    console.error('Gemini returned no text:', data);
-    return '';
-  }
-
   return responseAsJson ? text : text;
 }
 
@@ -98,20 +88,6 @@ YÊU CẦU:
 - Có số tiết
 - Có isIntegrated
 - TRẢ VỀ JSON ARRAY THUẦN (KHÔNG markdown)
-
-FORMAT:
-[
-  {
-    "title": "string",
-    "periods": "string",
-    "isIntegrated": boolean
-  }
-]
-
-NỘI DUNG:
----
-${textContent}
----
 `;
 
   const raw = await callGemini(
@@ -119,25 +95,14 @@ ${textContent}
       contents: [
         {
           role: 'user',
-          parts: [{ text: prompt }],
+          parts: [{ text: `${prompt}\n---\n${textContent}\n---` }],
         },
       ],
-      generationConfig: {
-        temperature: 0,
-        maxOutputTokens: 2048,
-      },
     },
     true
   );
 
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    console.error('JSON parse failed:', raw);
-    throw new Error(
-      'AI không trả về JSON hợp lệ khi phân tích bài học.'
-    );
-  }
+  return JSON.parse(raw);
 };
 
 /* ================= GENERATE LESSON PLAN ================= */
@@ -159,31 +124,16 @@ THÔNG TIN BÀI:
 - Bộ sách: "${bookSeries}"
 - Môn: "${subject}"
 - Lớp: "${grade}"
-
-YÊU CẦU:
-- Soạn đầy đủ giáo án
-- Chia rõ từng tiết nếu có nhiều tiết
-- Văn phong giáo dục Việt Nam
 `;
 
-  const text = await callGemini({
+  return callGemini({
     contents: [
       {
         role: 'user',
         parts: [{ text: fullPrompt }],
       },
     ],
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 4096,
-    },
   });
-
-  if (!text) {
-    throw new Error('Gemini không trả nội dung giáo án.');
-  }
-
-  return text;
 };
 
 /* ================= SMAS COMMENTS ================= */
@@ -194,13 +144,8 @@ export const generateSmasComment = async (
   performance: string,
   keywords: string[]
 ): Promise<string[]> => {
-  const roleDescription =
-    role === 'GVCN'
-      ? 'Bạn là giáo viên chủ nhiệm.'
-      : 'Bạn là giáo viên bộ môn.';
-
   const prompt = `
-${roleDescription}
+${role === 'GVCN' ? 'Bạn là giáo viên chủ nhiệm.' : 'Bạn là giáo viên bộ môn.'}
 
 Viết 3 nhận xét học bạ cho học sinh ${studentName}.
 Mức đánh giá: ${performance}
@@ -216,14 +161,7 @@ Ngăn cách mỗi nhận xét bằng ---
         parts: [{ text: prompt }],
       },
     ],
-    generationConfig: {
-      temperature: 0.8,
-      maxOutputTokens: 1024,
-    },
   });
 
-  return text
-    .split('---')
-    .map(t => t.trim())
-    .filter(Boolean);
+  return text.split('---').map(t => t.trim()).filter(Boolean);
 };
